@@ -2009,22 +2009,15 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                     return -1;
                 }
 
-                // For profiling, toggle the line below to force file-based loading
-                bool force_file_only = true;  // Set to false to enable memfd loading
-
                 // Try memfd first, fall back to file-based
                 char so_path[256];
                 void *handle = nullptr;
                 int memfd = -1;
 
-                // Skip memfd if file-only mode is set
-                int memfd_rc = -1;
-                if (!force_file_only) {
-                    // Attempt memfd-based loading first
-                    memfd_rc = load_orchestration_so_with_memfd(
-                        so_data, so_size, thread_idx, &handle, so_path, &memfd
-                    );
-                }
+                // Attempt memfd-based loading first
+                int memfd_rc = load_orchestration_so_with_memfd(
+                    so_data, so_size, thread_idx, &handle, so_path, &memfd
+                );
 
                 if (memfd_rc == 0 && handle != nullptr) {
                     // memfd loading succeeded, use memfd-loaded handle
