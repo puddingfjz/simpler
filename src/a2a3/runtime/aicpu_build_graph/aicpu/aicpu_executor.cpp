@@ -1620,10 +1620,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                     return -1;
                 }
 
-                uint64_t t_so_load_start = get_sys_cnt_aicpu();
-
-                // For profiling, toggle the line below to force file-based loading
-                bool force_file_only = false;  // Set to false to enable memfd loading
+                // Toggle to force file-based loading (for debugging/testing)
+                bool force_file_only = false;
 
                 // Try memfd first, fall back to file-based
                 char so_path[256];
@@ -1646,7 +1644,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
                 if (handle == nullptr) {
                     // memfd failed or unavailable - use file-based loading
-                    uint64_t t_file_start = get_sys_cnt_aicpu();
                     orch_so_memfd_ = -1;
 
                     // Try multiple paths that may allow execution on AICPU
@@ -1656,11 +1653,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                     };
                     const int32_t num_candidates = sizeof(candidate_dirs) / sizeof(candidate_dirs[0]);
 
-                    uint64_t t_file_write = 0;
                     for (int32_t i = 0; i < num_candidates && !file_created; i++) {
                         snprintf(so_path, sizeof(so_path), "%s/libdevice_orch_%d.so", candidate_dirs[i], getpid());
-
-                        uint64_t t0 = get_sys_cnt_aicpu();
                         int32_t fd = open(so_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
                         if (fd < 0) {
                             DEV_INFO(
@@ -1670,7 +1664,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                         }
                         ssize_t written = write(fd, so_data, so_size);
                         close(fd);
-                        uint64_t t1 = get_sys_cnt_aicpu();
 
                         if (written != static_cast<ssize_t>(so_size)) {
                             DEV_INFO(
@@ -1680,7 +1673,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                             continue;
                         }
                         file_created = true;
-                        t_file_write = (t1 - t0);
                         DEV_INFO("Thread %d: Created SO file at %s (%zu bytes)", thread_idx, so_path, so_size);
                     }
 
@@ -1689,11 +1681,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                         return -1;
                     }
 
-                    uint64_t t2 = get_sys_cnt_aicpu();
                     dlerror();
                     handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
                     const char *dlopen_err = dlerror();
-                    uint64_t t3 = get_sys_cnt_aicpu();
 
                     if (handle == nullptr) {
                         DEV_ERROR("Thread %d: dlopen failed: %s", thread_idx, dlopen_err ? dlopen_err : "unknown");
@@ -1701,10 +1691,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                         return -1;
                     }
                     DEV_INFO("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
-
-                    uint64_t t_file_end = get_sys_cnt_aicpu();
-                    DEV_ALWAYS("Thread %d: [FILE_TIMING] write=%lu, dlopen=%lu, total=%lu (ticks)",
-                               thread_idx, t_file_write, t3 - t2, t_file_end - t_file_start);
                 }
 
                 dlerror();
@@ -1816,10 +1802,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 orch_args_cached_ = &args;
                 orch_so_handle_ = handle;
                 snprintf(orch_so_path_, sizeof(orch_so_path_), "%s", so_path);
-
-                uint64_t t_so_load_end = get_sys_cnt_aicpu();
-                DEV_ALWAYS("Thread %d: [SO_LOADING] method=%s, total_time=%lu ticks",
-                           thread_idx, (orch_so_memfd_ >= 0) ? "memfd" : "file", t_so_load_end - t_so_load_start);
 
                 // All-orchestrator mode: primary orchestrator does one-time init
                 if (sched_thread_num_ == 0) {

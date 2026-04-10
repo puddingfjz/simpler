@@ -34,7 +34,6 @@ extern "C" {
 #include <cstdio>
 
 #include "aicpu/device_log.h"
-#include "aicpu/device_time.h"  // For get_sys_cnt_aicpu()
 
 /**
  * Load orchestration SO using memfd
@@ -51,16 +50,12 @@ static inline int load_orchestration_so_with_memfd(
     *out_memfd = -1;
     out_so_path[0] = '\0';
 
-    uint64_t t_start = get_sys_cnt_aicpu();
-
     if (so_data == nullptr || so_size == 0) {
         return -1;
     }
 
     // Create memfd
-    uint64_t t0 = get_sys_cnt_aicpu();
     int fd = memfd_create("libdevice_orch", MFD_CLOEXEC);
-    uint64_t t1 = get_sys_cnt_aicpu();
 
     if (fd < 0) {
         return -1;
@@ -92,9 +87,7 @@ static inline int load_orchestration_so_with_memfd(
     char link_path[256];
     snprintf(link_path, sizeof(link_path), "/tmp/libdevice_orch_%d_%d.so", getpid(), orch_thread_num);
 
-    uint64_t t4 = get_sys_cnt_aicpu();
     int symlink_rc = symlink(proc_fd_path, link_path);
-    uint64_t t5 = get_sys_cnt_aicpu();
     if (symlink_rc != 0) {
         close(fd);
         return -1;
@@ -103,10 +96,8 @@ static inline int load_orchestration_so_with_memfd(
     snprintf(out_so_path, 256, "%s", link_path);
 
     // Try dlopen from the symlink
-    uint64_t t6 = get_sys_cnt_aicpu();
     dlerror();
     void *handle = dlopen(out_so_path, RTLD_LAZY | RTLD_LOCAL);
-    uint64_t t7 = get_sys_cnt_aicpu();
 
     // Clean up symlink immediately after dlopen (dlopen has its own reference)
     unlink(link_path);
@@ -115,15 +106,6 @@ static inline int load_orchestration_so_with_memfd(
         close(fd);
         return -1;
     }
-
-    uint64_t t_end = get_sys_cnt_aicpu();
-    DEV_ALWAYS("Thread %d: [MEMFD_TIMING] create=%lu, write=%lu, symlink=%lu, dlopen=%lu, total=%lu (ticks)",
-               orch_thread_num,
-               (t1 - t0),
-               (t3 - t2),
-               (t5 - t4),
-               (t7 - t6),
-               (t_end - t_start));
 
     *out_handle = handle;
     *out_memfd = fd;
