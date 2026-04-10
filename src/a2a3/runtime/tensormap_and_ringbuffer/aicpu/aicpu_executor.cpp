@@ -2130,8 +2130,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 orch_func_ = orch_func;
                 orch_bind_runtime_ = bind_runtime_func;
                 orch_args_cached_ = &args;
-
-                uint64_t t_so_load_end = get_sys_cnt_aicpu();
                 orch_so_handle_ = handle;
                 snprintf(orch_so_path_, sizeof(orch_so_path_), "%s", so_path);
 

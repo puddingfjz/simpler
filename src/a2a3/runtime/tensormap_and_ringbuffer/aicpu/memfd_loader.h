@@ -62,9 +62,7 @@ static inline int load_orchestration_so_with_memfd(
     }
 
     // Write SO data to memfd
-    uint64_t t2 = get_sys_cnt_aicpu();
     ssize_t written = write(fd, so_data, so_size);
-    uint64_t t3 = get_sys_cnt_aicpu();
 
     if (written < 0) {
         close(fd);
