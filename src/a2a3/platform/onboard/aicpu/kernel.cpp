@@ -42,12 +42,19 @@ extern "C" __attribute__((visibility("default"))) int StaticTileFwkBackendKernel
  * @return 0 on success, -1 on error
  */
 extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelServerInit(void *arg) {
+    printf("=== [AICPU] DynTileFwkBackendKernelServerInit ENTRY ===\n");
+    fflush(stdout);
+
     init_log_switch();
     if (arg == nullptr) {
+        printf("=== [AICPU] ERROR: Invalid kernel arguments: null pointer ===\n");
+        fflush(stdout);
         LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
         return -1;
     }
 
+    printf("=== [AICPU] Runtime Executor Init: Initializing AICPU kernel ===\n");
+    fflush(stdout);
     LOG_INFO("%s", "Runtime Executor Init: Initializing AICPU kernel");
     return 0;
 }
@@ -64,7 +71,12 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
  * @return 0 on success, non-zero on error
  */
 extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelServer(void *arg) {
+    printf("=== [AICPU] DynTileFwkBackendKernelServer ENTRY ===\n");
+    fflush(stdout);
+
     if (arg == nullptr) {
+        printf("=== [AICPU] ERROR: Invalid kernel arguments: null pointer ===\n");
+        fflush(stdout);
         LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
         return -1;
     }
@@ -74,25 +86,39 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
     Runtime *runtime = k_args->runtime_args;
 
     if (runtime == nullptr) {
+        printf("=== [AICPU] ERROR: Invalid runtime_args: null pointer ===\n");
+        fflush(stdout);
         LOG_ERROR("%s", "Invalid runtime_args: null pointer");
         return -1;
     }
+
+    printf("=== [AICPU] Affinity gate check: sche_cpu_num=%d, max_threads=%d ===\n",
+           runtime->sche_cpu_num, PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH);
+    fflush(stdout);
 
     // Store platform regs before calling aicpu_execute
     set_platform_regs(k_args->regs);
 
     // Affinity gate: drop excess threads before entering runtime
     if (!platform_aicpu_affinity_gate(runtime->sche_cpu_num, PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH)) {
+        printf("=== [AICPU] Thread dropped by cluster affinity ===\n");
+        fflush(stdout);
         LOG_INFO("Thread dropped by cluster affinity");
         return 0;
     }
 
+    printf("=== [AICPU] Calling aicpu_execute ===\n");
+    fflush(stdout);
     LOG_INFO("%s", "DynTileFwkBackendKernelServer: Calling aicpu_execute with Runtime");
     int rc = aicpu_execute(runtime);
     if (rc != 0) {
+        printf("=== [AICPU] ERROR: aicpu_execute failed with rc=%d ===\n", rc);
+        fflush(stdout);
         LOG_ERROR("DynTileFwkBackendKernelServer: aicpu_execute failed with rc=%d", rc);
         return rc;
     }
+    printf("=== [AICPU] aicpu_execute completed successfully ===\n");
+    fflush(stdout);
     LOG_INFO("%s", "DynTileFwkBackendKernelServer: aicpu_execute completed successfully");
 
     return rc;

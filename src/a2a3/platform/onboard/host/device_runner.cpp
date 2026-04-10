@@ -438,8 +438,10 @@ int DeviceRunner::run(
         }
     }
     LOG_DEBUG("");
+    std::cout << "[LOG-1] After LOG_DEBUG at line 440\n" << std::flush;
 
     // Scope guards for cleanup on all exit paths
+    std::cout << "[LOG-2] Creating regs_cleanup scope guard\n" << std::flush;
     auto regs_cleanup = RAIIScopeGuard([this]() {
         if (kernel_args_.args.regs != 0) {
             mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.args.regs));
@@ -447,30 +449,40 @@ int DeviceRunner::run(
         }
     });
 
+    std::cout << "[LOG-3] Creating runtime_args_cleanup scope guard\n" << std::flush;
     auto runtime_args_cleanup = RAIIScopeGuard([this]() {
         kernel_args_.finalize_device_kernel_args();
         kernel_args_.finalize_runtime_args();
     });
 
+    std::cout << "[LOG-4] Checking runtime.enable_profiling (value=" << runtime.enable_profiling << ")\n" << std::flush;
     // Initialize performance profiling if enabled
     if (runtime.enable_profiling) {
+        std::cout << "[LOG-5] Profiling enabled, calling init_performance_profiling\n" << std::flush;
         rc = init_performance_profiling(runtime, num_aicore, device_id);
+        std::cout << "[LOG-6] init_performance_profiling returned rc=" << rc << "\n" << std::flush;
         if (rc != 0) {
             LOG_ERROR("init_performance_profiling failed: %d", rc);
             return rc;
         }
+        std::cout << "[LOG-7] Starting memory manager\n" << std::flush;
         // Start memory management thread
         perf_collector_.start_memory_manager();
+        std::cout << "[LOG-8] Memory manager started\n" << std::flush;
+    } else {
+        std::cout << "[LOG-5b] Profiling NOT enabled, skipping profiling init\n" << std::flush;
     }
 
+    std::cout << "[LOG-9] Creating perf_cleanup scope guard\n" << std::flush;
     auto perf_cleanup = RAIIScopeGuard([this]() {
         bool was_initialized = perf_collector_.is_initialized();
         if (was_initialized) {
             perf_collector_.stop_memory_manager();
         }
     });
+    std::cout << "[LOG-10] After perf_cleanup scope guard\n" << std::flush;
 
-    std::cout << "\n=== Initialize runtime args ===" << '\n';
+    std::cout << "\n=== Initialize runtime args ===" << '\n' << std::flush;
     // Initialize runtime args
     rc = kernel_args_.init_runtime_args(runtime, mem_alloc_);
     if (rc != 0) {
@@ -478,11 +490,15 @@ int DeviceRunner::run(
         return rc;
     }
 
+    std::cout << "[LOG-11]\n" << std::flush;
+
     rc = kernel_args_.init_ffts_base_addr();
     if (rc != 0) {
         LOG_ERROR("init_ffts_base_addr failed: %d", rc);
         return rc;
     }
+
+    std::cout << "[LOG-12]\n" << std::flush;
 
     // Copy KernelArgs to device memory for AICore
     rc = kernel_args_.init_device_kernel_args(mem_alloc_);
@@ -491,7 +507,7 @@ int DeviceRunner::run(
         return rc;
     }
 
-    std::cout << "\n=== launch_aicpu_kernel DynTileFwkKernelServerInit===" << '\n';
+    std::cout << "\n=== launch_aicpu_kernel DynTileFwkKernelServerInit===" << '\n' << std::flush;
     // Launch AICPU init kernel
     rc = launch_aicpu_kernel(stream_aicpu_, &kernel_args_.args, "DynTileFwkKernelServerInit", 1);
     if (rc != 0) {
@@ -499,7 +515,7 @@ int DeviceRunner::run(
         return rc;
     }
 
-    std::cout << "\n=== launch_aicpu_kernel DynTileFwkKernelServer===" << '\n';
+    std::cout << "\n=== launch_aicpu_kernel DynTileFwkKernelServer===" << '\n' << std::flush;
     // Launch AICPU main kernel (over-launch for affinity gate)
     rc = launch_aicpu_kernel(
         stream_aicpu_, &kernel_args_.args, "DynTileFwkKernelServer", PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH
@@ -509,13 +525,15 @@ int DeviceRunner::run(
         return rc;
     }
 
-    std::cout << "\n=== launch_aicore_kernel===" << '\n';
+    std::cout << "\n=== launch_aicore_kernel===" << '\n' << std::flush;
     // Launch AICore kernel (pass device copy of KernelArgs)
     rc = launch_aicore_kernel(stream_aicore_, kernel_args_.device_k_args_);
     if (rc != 0) {
         LOG_ERROR("launch_aicore_kernel failed: %d", rc);
         return rc;
     }
+
+    std::cout << "[LOG-13]\n" << std::flush;
 
     {
         // Poll and collect performance data in a separate collector thread
@@ -525,13 +543,16 @@ int DeviceRunner::run(
                 poll_and_collect_performance_data(runtime.get_task_count());
             });
         }
+
+        std::cout << "[LOG-14]\n" << std::flush;
+
         auto thread_guard = RAIIScopeGuard([&]() {
             if (runtime.enable_profiling && collector_thread.joinable()) {
                 collector_thread.join();
             }
         });
 
-        std::cout << "\n=== rtStreamSynchronize stream_aicpu_===" << '\n';
+        std::cout << "\n=== rtStreamSynchronize stream_aicpu_===" << '\n' << std::flush;
         // Synchronize streams
         rc = rtStreamSynchronize(stream_aicpu_);
         if (rc != 0) {
@@ -539,30 +560,50 @@ int DeviceRunner::run(
             return rc;
         }
 
-        std::cout << "\n=== rtStreamSynchronize stream_aicore_===" << '\n';
+        std::cout << "\n=== rtStreamSynchronize stream_aicore_===" << '\n' << std::flush;
         rc = rtStreamSynchronize(stream_aicore_);
         if (rc != 0) {
             LOG_ERROR("rtStreamSynchronize (AICore) failed: %d", rc);
             return rc;
         }
 
+        std::cout << "[LOG-15]\n" << std::flush;
+
         // Signal collector that device execution is complete
         if (runtime.enable_profiling) {
             perf_collector_.signal_execution_complete();
         }
+
+        std::cout << "[LOG-16]\n" << std::flush;
     }
 
     // Stop memory management, drain remaining buffers, collect phase data, export
     if (runtime.enable_profiling) {
         perf_collector_.stop_memory_manager();
+
+        std::cout << "[LOG-17]\n" << std::flush;
+
         perf_collector_.drain_remaining_buffers();
+
+        std::cout << "[LOG-18]\n" << std::flush;
+
         perf_collector_.scan_remaining_perf_buffers();
+
+        std::cout << "[LOG-19]\n" << std::flush;
+
         perf_collector_.collect_phase_data();
+
+        std::cout << "[LOG-20]\n" << std::flush;
+        
         export_swimlane_json();
     }
 
+    std::cout << "[LOG-21]\n" << std::flush;
+
     // Print handshake results (reads from device memory, must be before free)
     print_handshake_results();
+
+    std::cout << "[LOG-18]\n" << std::flush;
 
     return 0;
 }

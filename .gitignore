@@ -24,6 +24,7 @@ examples/scripts/_deps/
 # Profiling files
 outputs
 tmp
+profiling_logs_*
 
 # Mid-work documentation
 .docs
@@ -37,3 +38,6 @@ compile_commands.json
 # Built nanobind extensions
 python/_task_interface*.so
 python/_task_interface*.dylib
+
+# Log files
+*.log
