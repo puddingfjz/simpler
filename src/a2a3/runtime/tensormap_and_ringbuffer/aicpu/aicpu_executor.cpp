@@ -1951,15 +1951,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
                 uint64_t t_so_load_start = get_sys_cnt_aicpu();
 
-                // Check PTO_MEMFD_MODE environment variable for loading strategy
-                // NOTE: getenv() doesn't work on AICPU (separate process).
-                // For profiling, uncomment the appropriate line below:
-                bool force_memfd_only = false;
-                bool force_file_only = false;
-
-                // PROFILING: Toggle these lines for profiling
-                // force_memfd_only = true;   // Use this for memfd profiling
-                force_file_only = true;    // Use this for file profiling
+                // For profiling, toggle the line below to force file-based loading
+                bool force_file_only = false;  // Set to false to enable memfd loading
 
                 // Try memfd first, fall back to file-based
                 char so_path[256];
@@ -1976,48 +1969,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 }
 
                 if (memfd_rc == 0 && handle != nullptr) {
-                    // // memfd loading succeeded, use memfd-loaded handle
-                    // orch_so_memfd_ = memfd;
-
-
-                    // memfd loading succeeded - verify critical symbols are accessible
-
-                    // Verify aicpu_orchestration_entry can be found
-                    dlerror();
-                    void *test_sym = dlsym(handle, "aicpu_orchestration_entry");
-                    const char *dlsym_err = dlerror();
-
-                    if (test_sym == nullptr) {
-                        // Symbol not accessible - this is a known issue with memfd on AICPU
-                        DEV_ALWAYS("Thread %d: === memfd symbol verification FAILED ===", thread_idx);
-                        DEV_ALWAYS("Thread %d: dlsym error: %s", thread_idx, dlsym_err ? dlsym_err : "unknown");
-                        printf("=== [HOST] Thread %d: === memfd symbol verification FAILED ===\n", thread_idx);
-                        printf("=== [HOST] Thread %d: Error: %s ===\n", thread_idx, dlsym_err ? dlsym_err : "unknown");
-                        fflush(stdout);
-
-                        // Close memfd handle and fall back to file-based loading
-                        if (force_memfd_only) {
-                            // In memfd-only mode, fail instead of falling back to file
-                            DEV_ERROR("Thread %d: Memfd-only mode: memfd loading failed, not falling back to file", thread_idx);
-                            dlclose(handle);
-                            close(memfd);
-                            handle = nullptr;
-                            memfd = -1;
-                            return -1;
-                        }
-
-                        DEV_ALWAYS("Thread %d: Closing memfd handle and falling back to file", thread_idx);
-                        dlclose(handle);
-                        close(memfd);
-                        handle = nullptr;
-                        memfd = -1;
-                        orch_so_memfd_ = -1;
-
-                        // Fall through to file-based loading below
-                    } else {
-                        // Symbols accessible, use memfd-loaded handle
-                        orch_so_memfd_ = memfd;
-                    }
+                    // memfd loading succeeded, use memfd-loaded handle
+                    orch_so_memfd_ = memfd;
                 }
 
                 if (handle == nullptr) {
@@ -2073,25 +2026,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                     uint64_t t_file_end = get_sys_cnt_aicpu();
                     DEV_ALWAYS("Thread %d: [FILE_TIMING] write=%lu, dlopen=%lu, total=%lu (ticks)",
                                thread_idx, t_file_write, t3 - t2, t_file_end - t_file_start);
-                }
-
-                // Try to list some symbols from the loaded SO
-                const char *test_symbols[] = {
-                    "aicpu_orchestration_entry",
-                    "aicpu_orchestration_config",
-                    "pto2_framework_bind_runtime",
-                    nullptr
-                };
-                for (int i = 0; test_symbols[i] != nullptr; i++) {
-                    dlerror();
-                    void *sym = dlsym(handle, test_symbols[i]);
-                    const char *err = dlerror();
-                    if (sym != nullptr) {
-                        DEV_ALWAYS("Thread %d: Found symbol: %s at %p", thread_idx, test_symbols[i], sym);
-                    } else {
-                        DEV_ALWAYS("Thread %d: Symbol NOT found: %s (%s)", thread_idx, test_symbols[i],
-                                  err ? err : "unknown");
-                    }
                 }
 
                 dlerror();
@@ -2485,24 +2419,15 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
     // Scheduler thread (orchestrator threads skip dispatch when orch_to_sched_ is false)
     if (!completed_.load(std::memory_order_acquire) && (thread_idx < sched_thread_num_ || orch_to_sched_)) {
-        DEV_ALWAYS("Thread %d: === Scheduler branch ===", thread_idx);
-
         // Device orchestration: wait for primary orchestrator to initialize SM header
         if (!runtime->get_orch_built_on_host()) {
-            DEV_ALWAYS("Thread %d: === Waiting for runtime init ===", thread_idx);
             while (!runtime_init_ready_.load(std::memory_order_acquire)) {
                 SPIN_WAIT_HINT();
             }
-            DEV_ALWAYS("Thread %d: === Runtime init ready ===", thread_idx);
         }
         always_assert(rt != nullptr);
-        DEV_ALWAYS("Thread %d: === Calling resolve_and_dispatch_pto2 ===", thread_idx);
         int32_t completed = resolve_and_dispatch_pto2(runtime, thread_idx);
-        DEV_ALWAYS("Thread %d: === resolve_and_dispatch_pto2 returned %d ===", thread_idx, completed);
         DEV_INFO("Thread %d: Executed %d tasks from runtime", thread_idx, completed);
-    } else {
-        DEV_ALWAYS("Thread %d: === Skipping scheduler (completed=%d, idx=%d, sched=%d) ===",
-                  thread_idx, completed_.load(std::memory_order_acquire), thread_idx, sched_thread_num_);
     }
 
     // Always shutdown AICore — even if completed_ was already true.
@@ -2536,13 +2461,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // Handle cleanup based on loading method
             if (orch_so_memfd_ >= 0) {
                 // memfd-based: close fd AFTER dlclose
-                printf("=== [HOST] Thread %d: === Cleaning up memfd-based SO (fd=%d) ===\n", thread_idx, orch_so_memfd_);
-                fflush(stdout);
                 cleanup_memfd_so(orch_so_memfd_, orch_so_handle_);
             } else {
                 // File-based: dlclose handle and unlink file
-                printf("=== [HOST] Thread %d: === Cleaning up file-based SO (path=%s) ===\n", thread_idx, orch_so_path_);
-                fflush(stdout);
                 dlclose(orch_so_handle_);
                 unlink(orch_so_path_);
             }
@@ -2553,10 +2474,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 }
 
 void AicpuExecutor::deinit(Runtime *runtime) {
-    printf("=== [AICPU] AicpuExecutor::deinit ENTRY ===\n");
-    fflush(stdout);
-    DEV_INFO("DeInit: AicpuExecutor::deinit called");
-
     // 1. Invalidate AICPU cache for Runtime address range.
     //    Next round's Host DMA (rtMemcpy) writes fresh Runtime to HBM but
     //    bypasses this cache. Invalidating now ensures next round reads from HBM.
@@ -2733,28 +2650,6 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     }
 
     DEV_INFO("%s", "aicpu_execute: Starting AICPU kernel execution");
-
-    // Debug: Verify Runtime object accessibility
-    DEV_INFO("DEBUG: Runtime pointer = %p", runtime);
-    DEV_INFO("DEBUG: get_device_orch_so_data() = %p", runtime->get_device_orch_so_data());
-    DEV_INFO("DEBUG: get_device_orch_so_size() = %zu", runtime->get_device_orch_so_size());
-
-    // Debug: Verify SO data integrity (check ELF header)
-    const void *so_data = runtime->get_device_orch_so_data();
-    size_t so_size = runtime->get_device_orch_so_size();
-    if (so_data != nullptr && so_size > 0) {
-        const uint8_t *ptr = static_cast<const uint8_t*>(so_data);
-        DEV_INFO("DEBUG: SO header = %02x %02x %02x %02x (expecting ELF: 7f 45 4c 46)",
-                 ptr[0], ptr[1], ptr[2], ptr[3]);
-        // Verify ELF magic number
-        if (ptr[0] == 0x7f && ptr[1] == 'E' && ptr[2] == 'L' && ptr[3] == 'F') {
-            DEV_INFO("DEBUG: ELF header valid");
-        } else {
-            DEV_ERROR("DEBUG: Invalid ELF header! Data may be corrupted");
-        }
-    } else {
-        DEV_WARN("DEBUG: SO data is null or size is 0");
-    }
 
     // Get platform register addresses from platform-level global
     g_aicpu_executor.regs_ = get_platform_regs();

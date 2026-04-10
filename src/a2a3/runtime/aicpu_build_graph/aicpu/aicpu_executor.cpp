@@ -28,6 +28,7 @@
 #include "pto2_dispatch_payload.h"
 #include "runtime.h"
 #include "spin_hint.h"
+#include "memfd_loader.h"
 
 // Runtime headers (full struct definition for create/destroy + PTO2_SCOPE)
 #include "pto_runtime2.h"
@@ -241,6 +242,7 @@ struct AicpuExecutor {
     // Orchestration SO handle - defer dlclose until all tasks complete
     void *orch_so_handle_{nullptr};
     char orch_so_path_[256]{};  // Path to orchestration SO file for cleanup
+    int orch_so_memfd_{-1};      // memfd for memfd_create path (-1 if file-based)
 
     // Shared orchestration function pointer (loaded by first orch thread, used by all)
     DeviceOrchestrationFunc orch_func_{nullptr};
@@ -1618,50 +1620,92 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                     return -1;
                 }
 
-                // Try multiple paths that may allow execution on AICPU
+                uint64_t t_so_load_start = get_sys_cnt_aicpu();
+
+                // For profiling, toggle the line below to force file-based loading
+                bool force_file_only = false;  // Set to false to enable memfd loading
+
+                // Try memfd first, fall back to file-based
                 char so_path[256];
-                bool file_created = false;
-                const char *candidate_dirs[] = {
-                    "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device", "/usr/lib64", "/lib64", "/var/tmp", "/tmp"
-                };
-                const int32_t num_candidates = sizeof(candidate_dirs) / sizeof(candidate_dirs[0]);
+                void *handle = nullptr;
+                int memfd = -1;
 
-                for (int32_t i = 0; i < num_candidates && !file_created; i++) {
-                    snprintf(so_path, sizeof(so_path), "%s/libdevice_orch_%d.so", candidate_dirs[i], getpid());
-                    int32_t fd = open(so_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-                    if (fd < 0) {
-                        DEV_INFO(
-                            "Thread %d: Cannot create SO at %s (errno=%d), trying next path", thread_idx, so_path, errno
-                        );
-                        continue;
-                    }
-                    ssize_t written = write(fd, so_data, so_size);
-                    close(fd);
-                    if (written != static_cast<ssize_t>(so_size)) {
-                        DEV_INFO(
-                            "Thread %d: Cannot write SO to %s (errno=%d), trying next path", thread_idx, so_path, errno
-                        );
-                        unlink(so_path);
-                        continue;
-                    }
-                    file_created = true;
-                    DEV_INFO("Thread %d: Created SO file at %s (%zu bytes)", thread_idx, so_path, so_size);
+                // Skip memfd if file-only mode is set
+                int memfd_rc = -1;
+                if (!force_file_only) {
+                    // Attempt memfd-based loading first
+                    memfd_rc = load_orchestration_so_with_memfd(
+                        so_data, so_size, thread_idx, &handle, so_path, &memfd
+                    );
                 }
 
-                if (!file_created) {
-                    DEV_ERROR("Thread %d: Failed to create SO file in any candidate path", thread_idx);
-                    return -1;
+                if (memfd_rc == 0 && handle != nullptr) {
+                    // memfd loading succeeded, use memfd-loaded handle
+                    orch_so_memfd_ = memfd;
                 }
 
-                dlerror();
-                void *handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
-                const char *dlopen_err = dlerror();
                 if (handle == nullptr) {
-                    DEV_ERROR("Thread %d: dlopen failed: %s", thread_idx, dlopen_err ? dlopen_err : "unknown");
-                    unlink(so_path);
-                    return -1;
+                    // memfd failed or unavailable - use file-based loading
+                    uint64_t t_file_start = get_sys_cnt_aicpu();
+                    orch_so_memfd_ = -1;
+
+                    // Try multiple paths that may allow execution on AICPU
+                    bool file_created = false;
+                    const char *candidate_dirs[] = {
+                        "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device", "/usr/lib64", "/lib64", "/var/tmp", "/tmp"
+                    };
+                    const int32_t num_candidates = sizeof(candidate_dirs) / sizeof(candidate_dirs[0]);
+
+                    uint64_t t_file_write = 0;
+                    for (int32_t i = 0; i < num_candidates && !file_created; i++) {
+                        snprintf(so_path, sizeof(so_path), "%s/libdevice_orch_%d.so", candidate_dirs[i], getpid());
+
+                        uint64_t t0 = get_sys_cnt_aicpu();
+                        int32_t fd = open(so_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+                        if (fd < 0) {
+                            DEV_INFO(
+                                "Thread %d: Cannot create SO at %s (errno=%d), trying next path", thread_idx, so_path, errno
+                            );
+                            continue;
+                        }
+                        ssize_t written = write(fd, so_data, so_size);
+                        close(fd);
+                        uint64_t t1 = get_sys_cnt_aicpu();
+
+                        if (written != static_cast<ssize_t>(so_size)) {
+                            DEV_INFO(
+                                "Thread %d: Cannot write SO to %s (errno=%d), trying next path", thread_idx, so_path, errno
+                            );
+                            unlink(so_path);
+                            continue;
+                        }
+                        file_created = true;
+                        t_file_write = (t1 - t0);
+                        DEV_INFO("Thread %d: Created SO file at %s (%zu bytes)", thread_idx, so_path, so_size);
+                    }
+
+                    if (!file_created) {
+                        DEV_ERROR("Thread %d: Failed to create SO file in any candidate path", thread_idx);
+                        return -1;
+                    }
+
+                    uint64_t t2 = get_sys_cnt_aicpu();
+                    dlerror();
+                    handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+                    const char *dlopen_err = dlerror();
+                    uint64_t t3 = get_sys_cnt_aicpu();
+
+                    if (handle == nullptr) {
+                        DEV_ERROR("Thread %d: dlopen failed: %s", thread_idx, dlopen_err ? dlopen_err : "unknown");
+                        unlink(so_path);
+                        return -1;
+                    }
+                    DEV_INFO("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
+
+                    uint64_t t_file_end = get_sys_cnt_aicpu();
+                    DEV_ALWAYS("Thread %d: [FILE_TIMING] write=%lu, dlopen=%lu, total=%lu (ticks)",
+                               thread_idx, t_file_write, t3 - t2, t_file_end - t_file_start);
                 }
-                DEV_INFO("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
 
                 dlerror();
                 auto config_func =
@@ -1772,6 +1816,10 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 orch_args_cached_ = &args;
                 orch_so_handle_ = handle;
                 snprintf(orch_so_path_, sizeof(orch_so_path_), "%s", so_path);
+
+                uint64_t t_so_load_end = get_sys_cnt_aicpu();
+                DEV_ALWAYS("Thread %d: [SO_LOADING] method=%s, total_time=%lu ticks",
+                           thread_idx, (orch_so_memfd_ >= 0) ? "memfd" : "file", t_so_load_end - t_so_load_start);
 
                 // All-orchestrator mode: primary orchestrator does one-time init
                 if (sched_thread_num_ == 0) {
@@ -2039,8 +2087,15 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         // Destroy PTO2 runtime and close orchestration SO (moved from orchestrator path)
         if (!runtime->get_orch_built_on_host() && orch_so_handle_ != nullptr) {
             pto2_runtime_destroy(rt);
-            dlclose(orch_so_handle_);
-            unlink(orch_so_path_);
+            // Handle cleanup based on loading method
+            if (orch_so_memfd_ >= 0) {
+                // memfd-based: close fd AFTER dlclose
+                cleanup_memfd_so(orch_so_memfd_, orch_so_handle_);
+            } else {
+                // File-based: dlclose handle and unlink file
+                dlclose(orch_so_handle_);
+                unlink(orch_so_path_);
+            }
         }
         DEV_ALWAYS("Thread %d: Last thread, marking executor finished", thread_idx);
     }
@@ -2100,6 +2155,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     orch_args_cached_ = nullptr;
     orch_so_handle_ = nullptr;
     orch_so_path_[0] = '\0';
+    orch_so_memfd_ = -1;
 
     // Reset register-related state
     for (int32_t i = 0; i < MAX_CORES_PER_THREAD; i++) {

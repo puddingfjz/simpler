@@ -1,10 +1,10 @@
 #!/bin/bash
-# Performance profiling script for SO loading: memfd vs file
-# Usage: ./profile_so_loading.sh [runs] [mode_name]
+# Performance profiling script for SO loading: memfd vs file (aicpu_build_graph runtime)
+# Usage: ./profile_aicpu_build_graph.sh [runs] [mode_name]
 #   runs: number of test runs (default: 5)
 #   mode_name: name for this test run, e.g., "memfd" or "file" (default: "test")
 #
-# NOTE: You must manually edit aicpu_executor.cpp to set force_file_only or force_memfd_only
+# NOTE: You must manually edit aicpu_executor.cpp to set force_file_only
 # before running this script. The mode_name parameter is only for logging purposes.
 
 set -e
@@ -23,7 +23,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Create log directory
-echo -e "${GREEN}=== SO Loading Performance Profiling: ${MODE_NAME} mode ===${NC}"
+echo -e "${GREEN}=== SO Loading Performance Profiling: ${MODE_NAME} mode (aicpu_build_graph) ===${NC}"
 echo "Creating log directory: ${LOG_DIR}"
 mkdir -p "${LOG_DIR}"
 
@@ -39,8 +39,8 @@ run_test() {
   # Run the test and save full output
   export ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
   python3 examples/scripts/run_example.py \
-    -k examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels \
-    -g examples/a2a3/tensormap_and_ringbuffer/vector_example/golden.py \
+    -k examples/a2a3/aicpu_build_graph/vector_example/kernels \
+    -g examples/a2a3/aicpu_build_graph/vector_example/golden.py \
     -p a2a3 -d 1 --verbose > "${log_file}" 2>&1
 
   # Extract timing metrics
@@ -91,14 +91,6 @@ parse_metric() {
   grep -E "$pattern" "$file" | head -1 | sed -n "s/.*$field=\([0-9]*\).*/\1/p"
 }
 
-# Function to parse MEMFD_TIMING format
-parse_memfd_metric() {
-  local file=$1
-  local field=$2
-
-  grep "\[MEMFD_TIMING\]" "$file" | head -1 | sed -n "s/.*$field=\([0-9]*\).*/\1/p"
-}
-
 # Function to parse FILE_TIMING format
 parse_file_metric() {
   local file=$1
@@ -135,6 +127,7 @@ echo -e "${GREEN}=== Generating Summary Report ===${NC}"
   echo "=========================================="
   echo "Date: $(date)"
   echo "Mode: ${MODE_NAME}"
+  echo "Runtime: aicpu_build_graph"
   echo "Runs: ${RUNS}"
   echo ""
 
@@ -162,7 +155,7 @@ echo -e "${GREEN}=== Generating Summary Report ===${NC}"
       fi
 
       if [ -n "$total" ] && [ "$total" != "0" ]; then
-        echo "  Total time: ${total} ticks (~$((${total} / 50000)) us)"
+        echo "  Total time: ${total} ticks"
         [ -n "$write" ] && [ "$write" != "0" ] && echo "  Write time: ${write} ticks"
         [ -n "$dlopen" ] && [ "$dlopen" != "0" ] && echo "  dlopen time: ${dlopen} ticks"
 
@@ -184,7 +177,7 @@ echo -e "${GREEN}=== Generating Summary Report ===${NC}"
   if [ $count -gt 0 ]; then
     avg=$((total_sum / count))
     echo "--- Average over ${count} runs ---"
-    echo "  Average total time: ${avg} ticks (~$((${avg} / 50000)) us)"
+    echo "  Average total time: ${avg} ticks"
     echo ""
   fi
 
