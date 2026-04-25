@@ -1,0 +1,54 @@
+cmake_minimum_required(VERSION 3.16.3)
+
+project(tile_fwk_server LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Set ASCEND paths
+set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
+if(NOT ASCEND_HOME_PATH)
+    set(ASCEND_HOME_PATH "/usr/local/Ascend/cann-8.5.0")
+endif()
+
+message(STATUS "Building libtilefwk_backend_server.so")
+message(STATUS "ASCEND_HOME_PATH: ${ASCEND_HOME_PATH}")
+
+# Find all required source files
+file(GLOB_RECURSE TILEFWK_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/pypto_aicpu_interface.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/device_sche_minimal.cpp
+)
+
+# Create shared library
+add_library(tile_fwk_server SHARED ${TILEFWK_SOURCES})
+
+target_compile_options(tile_fwk_server PRIVATE
+    -Wall
+    -Wextra
+    -std=gnu++17
+    -O3
+    -shared
+    -fPIC
+    -D__DEVICE__
+    -fno-common
+)
+
+target_include_directories(tile_fwk_server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tilefwk
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+    ${ASCEND_HOME_PATH}/include
+    ${ASCEND_HOME_PATH}/include/toolchain
+    ${ASCEND_HOME_PATH}/pkg_inc/base
+)
+
+target_link_libraries(tile_fwk_server PRIVATE
+    -ldl
+)
+
+# Set output name
+set_target_properties(tile_fwk_server PROPERTIES OUTPUT_NAME tilefwk_backend_server)
+
+# Install to build directory
+install(TARGETS tile_fwk_server LIBRARY DESTINATION build)
