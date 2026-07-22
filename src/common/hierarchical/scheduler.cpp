@@ -50,9 +50,6 @@ void Scheduler::start(const Config &cfg) {
 void Scheduler::stop() {
     stop_requested_.store(true, std::memory_order_release);
     completion_cv_.notify_all();
-    // Shut down every ready queue so any wait_pop waiters unblock.
-    cfg_.ready_sub_queue->shutdown();
-    cfg_.ready_next_level_queues->shutdown();
 
     if (sched_thread_.joinable()) sched_thread_.join();
 
@@ -69,7 +66,6 @@ void Scheduler::worker_done(WorkerCompletion completion) {
     // Group aggregation: only push to completion queue when ALL workers done
     if (s.is_group()) {
         WorkerCompletion terminal = completion;
-        bool group_terminal = false;
         {
             std::lock_guard<std::mutex> lk(s.group_mu);
             const int32_t group_size = s.group_size();
@@ -123,7 +119,6 @@ void Scheduler::worker_done(WorkerCompletion completion) {
 
             if (s.group_terminal_count.load(std::memory_order_acquire) < group_size) return;
 
-            group_terminal = true;
             if (s.group_failed) {
                 int32_t failure_index = s.group_first_failure_index;
                 terminal.group_index = failure_index;
@@ -138,7 +133,6 @@ void Scheduler::worker_done(WorkerCompletion completion) {
                 terminal.error_message.clear();
             }
         }
-        if (!group_terminal) return;
         completion = std::move(terminal);
     }
 
@@ -334,87 +328,50 @@ void Scheduler::try_consume(TaskSlot slot) {
 void Scheduler::dispatch_ready() {
     dispatch_next_level_group();
     dispatch_next_level_singles();
+    dispatch_sub_ready();
+}
 
-    // SUB scheduling remains unconstrained and shared.
-    auto drain_one = [this](ReadyQueue *q) {
-        TaskSlot slot;
-        while (q->try_pop(slot)) {
-            TaskSlotState &s = *cfg_.ring->slot_state(slot);
-            if (s.state.load(std::memory_order_acquire) != TaskState::READY) {
-                continue;
+void Scheduler::dispatch_sub_ready() {
+    TaskSlot slot;
+    while (cfg_.ready_sub_queue->try_pop(slot)) {
+        TaskSlotState &s = *cfg_.ring->slot_state(slot);
+        if (s.state.load(std::memory_order_acquire) != TaskState::READY) continue;
+        if (s.worker_type != WorkerType::SUB) {
+            throw std::runtime_error("Scheduler::dispatch_sub_ready: misrouted task slot");
+        }
+
+        const int32_t group_size = s.group_size();
+        std::vector<WorkerThread *> workers;
+        workers.reserve(static_cast<size_t>(group_size));
+        for (int32_t i = 0; i < group_size; ++i) {
+            WorkerThread *worker = cfg_.manager->pick_idle_sub_excluding(workers);
+            if (worker == nullptr) {
+                cfg_.ready_sub_queue->push(slot);
+                return;
             }
-            int N = s.group_size();  // 1 for normal tasks
+            workers.push_back(worker);
+        }
 
-            // Affinity-aware dispatch: pin args[i] to affinities[i] when set,
-            // fill remaining slots from the idle pool. NEXT_LEVEL affinity
-            // values are stable worker ids; SUB keeps index semantics for
-            // internal callers.
-            std::vector<WorkerThread *> workers(static_cast<size_t>(N), nullptr);
-            bool ok = true;
-
-            // Pass 1: satisfy affinity constraints
-            for (int i = 0; i < N; i++) {
-                int32_t aff = s.get_affinity(i);
-                if (aff >= 0) {
-                    auto *wt = s.worker_type == WorkerType::NEXT_LEVEL ?
-                                   cfg_.manager->get_worker_by_id(s.worker_type, aff) :
-                                   cfg_.manager->get_worker_by_index(s.worker_type, aff);
-                    if (!wt || !wt->idle() || !s.worker_allowed(i, wt->worker_id())) {
-                        ok = false;
-                        break;
-                    }
-                    workers[static_cast<size_t>(i)] = wt;
-                }
-            }
-
-            // Pass 2: fill unconstrained slots from idle pool
-            if (ok) {
-                for (int i = 0; i < N; i++) {
-                    if (workers[static_cast<size_t>(i)] != nullptr) continue;
-                    auto *wt = cfg_.manager->pick_idle(s.worker_type, workers, s.eligible_workers_for(i));
-                    if (!wt) {
-                        ok = false;
-                        break;
-                    }
-                    workers[static_cast<size_t>(i)] = wt;
-                }
-            }
-
-            if (!ok) {
-                q->push(slot);
-                break;
-            }
-
-            s.state.store(TaskState::RUNNING, std::memory_order_release);
+        s.state.store(TaskState::RUNNING, std::memory_order_release);
+        if (s.is_group()) {
+            std::lock_guard<std::mutex> lk(s.group_mu);
+            s.group_member_states.assign(static_cast<size_t>(group_size), GroupMemberState::NOT_DISPATCHED);
+            s.group_member_outcomes.assign(static_cast<size_t>(group_size), EndpointOutcome::SKIPPED);
+            s.group_terminal_count.store(0, std::memory_order_relaxed);
+            s.group_failed = false;
+            s.group_first_failure_index = -1;
+            s.group_first_failure_message.clear();
+        }
+        for (int32_t i = 0; i < group_size; ++i) {
             if (s.is_group()) {
                 std::lock_guard<std::mutex> lk(s.group_mu);
-                s.group_member_states.assign(static_cast<size_t>(N), GroupMemberState::NOT_DISPATCHED);
-                s.group_member_outcomes.assign(static_cast<size_t>(N), EndpointOutcome::SKIPPED);
-                s.group_terminal_count.store(0, std::memory_order_relaxed);
-                s.group_dispatched_count.store(0, std::memory_order_relaxed);
-                s.group_failed = false;
-                s.group_first_failure_index = -1;
-                s.group_first_failure_message.clear();
+                GroupMemberState &member_state = s.group_member_states[static_cast<size_t>(i)];
+                if (member_state != GroupMemberState::NOT_DISPATCHED || s.group_failed) continue;
+                member_state = GroupMemberState::RUNNING;
             }
-            for (int i = 0; i < N; i++) {
-                if (s.is_group()) {
-                    std::lock_guard<std::mutex> lk(s.group_mu);
-                    GroupMemberState &member_state = s.group_member_states[static_cast<size_t>(i)];
-                    if (member_state != GroupMemberState::NOT_DISPATCHED || s.group_failed) {
-                        continue;
-                    }
-                    member_state = GroupMemberState::RUNNING;
-                    s.group_dispatched_count.fetch_add(1, std::memory_order_relaxed);
-                }
-                WorkerDispatch d;
-                d.task_slot = slot;
-                d.group_index = i;
-                workers[static_cast<size_t>(i)]->dispatch(d);
-            }
+            workers[static_cast<size_t>(i)]->dispatch(WorkerDispatch{slot, i});
         }
-    };
-
-    drain_one(cfg_.ready_sub_queue);
+    }
 }
 
 void Scheduler::dispatch_next_level_group() {
@@ -434,9 +391,9 @@ void Scheduler::dispatch_next_level_group() {
         std::vector<WorkerThread *> workers;
         workers.reserve(static_cast<size_t>(group_size));
         for (int32_t i = 0; i < group_size; ++i) {
-            const int32_t worker_id = s.get_affinity(i);
+            const int32_t worker_id = s.target_worker_id(i);
             WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
-            if (worker == nullptr || !s.worker_allowed(i, worker_id)) {
+            if (worker == nullptr) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: invalid target worker");
             }
             if (std::find(workers.begin(), workers.end(), worker) != workers.end()) {
@@ -456,7 +413,6 @@ void Scheduler::dispatch_next_level_group() {
             s.group_member_states.assign(static_cast<size_t>(group_size), GroupMemberState::RUNNING);
             s.group_member_outcomes.assign(static_cast<size_t>(group_size), EndpointOutcome::SKIPPED);
             s.group_terminal_count.store(0, std::memory_order_relaxed);
-            s.group_dispatched_count.store(group_size, std::memory_order_relaxed);
             s.group_failed = false;
             s.group_first_failure_index = -1;
             s.group_first_failure_message.clear();
@@ -482,7 +438,7 @@ void Scheduler::dispatch_next_level_singles() {
         while (cfg_.ready_next_level_queues->try_pop_single(worker_id, slot)) {
             TaskSlotState &s = *cfg_.ring->slot_state(slot);
             if (s.state.load(std::memory_order_acquire) != TaskState::READY) continue;
-            if (s.worker_type != WorkerType::NEXT_LEVEL || s.is_group() || s.get_affinity(0) != worker_id) {
+            if (s.worker_type != WorkerType::NEXT_LEVEL || s.is_group() || s.target_worker_id(0) != worker_id) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_singles: misrouted task slot");
             }
             s.state.store(TaskState::RUNNING, std::memory_order_release);

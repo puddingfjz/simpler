@@ -590,7 +590,7 @@ def test_remote_session_manifest_requires_wildcard_bind_opt_in():
         worker.close()
 
 
-def test_remote_submit_worker_affinity_uses_stable_worker_id_after_mixed_add_order():
+def test_remote_submit_target_uses_stable_worker_id_after_mixed_add_order():
     class FakeCOrchestrator:
         def submit_next_level(self, *args):
             self.submit_next_level_args = args
@@ -614,7 +614,7 @@ def test_remote_submit_worker_affinity_uses_stable_worker_id_after_mixed_add_ord
         worker.close()
 
 
-def test_local_submit_worker_affinity_maps_stable_worker_id_after_mixed_add_order():
+def test_local_submit_target_maps_stable_worker_id_after_mixed_add_order():
     class FakeCOrchestrator:
         def submit_next_level(self, *args):
             self.submit_next_level_args = args

@@ -798,7 +798,7 @@ TEST_F(GroupSchedulerFixture, DependencyReleaseUsesConsumerWorkerQueue) {
     wait_consumed(consumer.task_slot);
 }
 
-TEST_F(GroupSchedulerFixture, AffinityMustBeInEligibleEndpointSet) {
+TEST_F(GroupSchedulerFixture, TargetMustBeInEligibleEndpointSet) {
     TaskArgs args = single_tensor_args(0xE1, TensorArgType::OUTPUT);
     EXPECT_THROW((void)orch.submit_next_level(C(56), args, cfg, 0, {1}), std::invalid_argument);
 }
@@ -808,7 +808,7 @@ TEST_F(GroupSchedulerFixture, UnknownEligibleWorkerIdIsRejectedBeforeScheduling)
     EXPECT_THROW((void)orch.submit_next_level(C(59), args, cfg, 99, {99}), std::invalid_argument);
 }
 
-TEST(SchedulerWorkerAffinityTest, NextLevelAffinityUsesWorkerIdNotVectorIndex) {
+TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
     TensorMap tm;
     Ring allocator;
     Scope scope;
@@ -921,10 +921,9 @@ TEST_F(GroupSchedulerFixture, RemoteSidecarRejectsLocalEndpointEligibility) {
 }
 
 // ===========================================================================
-// Strict-4: per-worker-type ready queues (no head-of-line blocking across
-// types). Covered here with one NEXT_LEVEL worker + one SUB worker: with a
-// saturated NEXT_LEVEL pool, a SUB task submitted afterwards must still
-// dispatch immediately instead of waiting behind the stuck next-level task.
+// Directed NEXT_LEVEL and shared SUB queues do not block each other. Covered
+// here with one worker of each type: a SUB task submitted while the exact
+// NEXT_LEVEL target is busy must still dispatch immediately.
 // ===========================================================================
 
 struct MixedTypeSchedulerFixture : public ::testing::Test {
@@ -1009,9 +1008,8 @@ TEST_F(MixedTypeSchedulerFixture, SubTaskDispatchesWhileNextLevelPoolSaturated) 
 
     // Now submit a sub task while the chip pool is saturated. With a single
     // shared ready queue this would block behind any next-level task sitting
-    // at the queue head waiting for a free chip worker. With per-type
-    // queues (Strict-4) it must dispatch immediately to the idle sub
-    // worker.
+    // in worker 0's directed FIFO. The independent shared SUB queue must
+    // dispatch immediately to the idle SUB worker.
     auto sub_args = single_tensor_args(0xBBB, TensorArgType::OUTPUT);
     auto sub = orch.submit_sub(C(7), sub_args);
 
@@ -1020,7 +1018,7 @@ TEST_F(MixedTypeSchedulerFixture, SubTaskDispatchesWhileNextLevelPoolSaturated) 
     EXPECT_TRUE(next_level_worker.is_running.load()) << "chip worker must still be busy";
 
     // Complete the sub task first; it reaches CONSUMED while the chip task
-    // is still running -- demonstrating independent per-type dispatch.
+    // is still running -- demonstrating independent queue dispatch.
     sub_worker.complete();
     wait_consumed(sub.task_slot);
     EXPECT_FALSE(is_consumed(chip.task_slot));

@@ -342,9 +342,10 @@ fanout wiring), see [orchestrator.md](orchestrator.md).
 
 ## 7. Data flow through dispatch
 
-After the scheduler picks an idle `WorkerThread` and calls `wt->dispatch(sid)`,
-the parent-side WorkerThread encodes `(callable digest, CallConfig, TaskArgs)`
-into the per-WT shm mailbox and the forked child decodes it:
+After the Scheduler resolves the submitted NEXT_LEVEL target (or chooses an
+idle SUB worker) and calls `wt->dispatch(sid)`, the parent-side WorkerThread
+encodes `(callable digest, CallConfig, TaskArgs)` into the per-WT shm mailbox
+and the forked child decodes it:
 
 ```text
 slot.callable.digest ─┐
@@ -491,7 +492,7 @@ L4 parent process
 | ---- | ----- | ------------ |
 | 1 | L4 parent Python | `w4.run(my_l4_orch)` → `scope_begin` → `my_l4_orch(orch4, ...)` |
 | 2 | L4 `Orchestrator.submit_next_level` | the L3 callable handle digest is stored in the slot's callable identity; slot pushed to L4's ready queue |
-| 3 | L4 Scheduler | pop slot; pick idle WorkerThread → the L3 child's mailbox |
+| 3 | L4 Scheduler | pop the target worker's FIFO → that L3 child's mailbox |
 | 4 | L4 WorkerThread (PROCESS) | encode `(callable digest, config, args_blob)` into mailbox; write `TASK_READY`; spin-poll |
 | 5 | L3 child `_child_worker_loop` | wake on `TASK_READY`; read digest → child-local slot → `my_l3_orch` |
 | 6 | L3 child | `inner_worker.run(my_l3_orch, args, cfg)` → `scope_begin` → `my_l3_orch(orch3, ...)` |
@@ -542,7 +543,7 @@ Step-by-step (one chip worker):
 | 1 | parent Python | user builds `args: TaskArgs`, calls `w3.run(my_orch, args, config)` |
 | 2 | `Worker::run` | `scope_begin` → call `my_orch(&orch_, args.view(), cfg)` |
 | 3 | `Orchestrator::submit_next_level` | `slot = ring.alloc()`; move `chip_args` into `slot.task_args`; walk tags → `tensormap.lookup(a.data)`, `tensormap.lookup(b.data)`, `tensormap.insert(c.data, slot)`; push ready |
-| 4 | Scheduler thread | pop `slot`; `wt = manager.pick_idle(NEXT_LEVEL)` (WT_chip_0); `wt->dispatch(slot)` |
+| 4 | Scheduler thread | pop `slot` from worker 0's FIFO; resolve stable worker ID 0 to WT_chip_0; dispatch |
 | 5 | WT_chip_0 parent side | encode mailbox: write reserved callable field, `config`, digest prefix, `write_blob` of task_args; set `TASK_READY`; spin-poll |
 | 6 | chip_0 child process | wake on `TASK_READY`; resolve digest to local slot; `read_blob` → `view`; call `ChipWorker::run(local_slot, view, cfg)` |
 | 7 | `ChipWorker::run` | assemble `ChipStorageTaskArgs` POD (memcpy view); call `pto2_run_runtime(local_slot, &chip_storage, &cfg)` |

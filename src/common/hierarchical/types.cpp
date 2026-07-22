@@ -28,7 +28,6 @@ void TaskSlotState::reset() {
     }
     fanout_released.store(0, std::memory_order_relaxed);
     output_keys.clear();
-    eligible_worker_ids.clear();
     fanin_producers.clear();
     failure_message.clear();
     worker_type = WorkerType::NEXT_LEVEL;
@@ -39,12 +38,11 @@ void TaskSlotState::reset() {
     is_group_ = false;
     remote_sidecar.clear();
     remote_sidecars.clear();
-    affinities.clear();
+    target_worker_ids.clear();
     // ring_idx / ring_slot_idx are deliberately NOT cleared here: Ring
     // stamps them at alloc() before the Orchestrator ever calls reset(),
     // and Ring::release() needs to read them for the FIFO advance. The
     // fields are rewritten on every alloc, so stale values never escape.
-    sub_complete_count.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(group_mu);
         group_member_states.clear();
@@ -54,7 +52,6 @@ void TaskSlotState::reset() {
         group_first_failure_message.clear();
     }
     group_terminal_count.store(0, std::memory_order_relaxed);
-    group_dispatched_count.store(0, std::memory_order_relaxed);
 }
 
 // =============================================================================
@@ -62,11 +59,8 @@ void TaskSlotState::reset() {
 // =============================================================================
 
 void ReadyQueue::push(TaskSlot slot) {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        q_.push(slot);
-    }
-    cv_.notify_one();
+    std::lock_guard<std::mutex> lk(mu_);
+    q_.push(slot);
 }
 
 bool ReadyQueue::try_pop(TaskSlot &out) {
@@ -87,25 +81,6 @@ bool ReadyQueue::try_front(TaskSlot &out) {
     if (q_.empty()) return false;
     out = q_.front();
     return true;
-}
-
-bool ReadyQueue::wait_pop(TaskSlot &out) {
-    std::unique_lock<std::mutex> lk(mu_);
-    cv_.wait(lk, [this] {
-        return !q_.empty() || shutdown_;
-    });
-    if (q_.empty()) return false;
-    out = q_.front();
-    q_.pop();
-    return true;
-}
-
-void ReadyQueue::shutdown() {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        shutdown_ = true;
-    }
-    cv_.notify_all();
 }
 
 // =============================================================================
@@ -154,11 +129,4 @@ bool NextLevelReadyQueues::empty() const {
         if (!queue->empty()) return false;
     }
     return true;
-}
-
-void NextLevelReadyQueues::shutdown() {
-    for (auto &queue : queues_) {
-        queue->shutdown();
-    }
-    group_queue_.shutdown();
 }

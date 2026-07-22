@@ -200,23 +200,13 @@ class Orchestrator:
         # is the last step before the rollback try.
         child_ptrs = worker._child_ptrs_in_args(c_args) if worker is not None else []
         prov_guard: Any = contextlib.nullcontext()
-        candidates: set[int] = set()
         if child_ptrs and worker is not None:
-            candidates = self._child_dispatch_candidates(cpp_worker_id, final_worker_ids)
             prov_guard = worker._child_prov_lock
         captured_refs = worker._capture_remote_sidecar_refs(remote_sidecar) if worker is not None else []
         try:
             with prov_guard:
                 if child_ptrs and worker is not None:
-                    worker._child_prov_check_dispatch(child_ptrs, candidates, api="submit_next_level")
-                    # The child_memory arg resolved to a unique owner; pass that
-                    # worker as the effective affinity so C++ keys the child
-                    # TensorKey by its owner (worker_id), not the raw -1.
-                    # Otherwise the same buffer submitted once as -1 and once as W
-                    # yields two keys (ptr,-1) / (ptr,W) and its dependency is
-                    # missed. The unique target is exactly what the scheduler
-                    # would have picked, so pinning it changes no scheduling.
-                    cpp_worker_id = next(iter(candidates))
+                    worker._child_prov_check_dispatch(child_ptrs, cpp_worker_id, api="submit_next_level")
                 self._o.submit_next_level(
                     digest, kind, target_namespace, c_args, cfg, cpp_worker_id, final_worker_ids, remote_sidecar
                 )
@@ -226,22 +216,6 @@ class Orchestrator:
             raise
         if self._worker is not None:
             self._worker._adopt_remote_slot_refs(captured_refs)
-
-    def _child_dispatch_candidates(self, cpp_worker_id: int, eligible_ids: Any) -> set[int]:
-        """Resolve the set of eligible target workers for a kind4 dispatch.
-
-        A pinned ``worker`` is the sole candidate; an unpinned ``-1`` falls back
-        to the callable's eligible set, or the full next-level pool when the
-        callable is unconstrained. ``_child_prov_check_dispatch`` rejects any
-        result that is not a single unique target.
-        """
-        if cpp_worker_id >= 0:
-            return {cpp_worker_id}
-        if eligible_ids:
-            return {int(w) for w in eligible_ids}
-        if self._worker is None:
-            return set()
-        return set(self._worker._next_level_target_ids())
 
     def submit_next_level_group(  # noqa: PLR0912 -- linear per-member sidecar + eligibility + kind4-provenance passes, one branch each
         self,
@@ -311,21 +285,18 @@ class Orchestrator:
             if eligible_worker_ids
             else []
         )
-        cpp_worker_ids = worker_ids
         # Per-member kind4 dispatch guard: each member's child_memory pointers
-        # must resolve to that member's unique eligible target and be live there.
+        # must be live on that member's exact submitted target.
         # Run this (fallible) analysis BEFORE capturing remote slot refs, so an
         # exception here can never strand captured refs outside the rollback try.
         worker = self._worker
-        member_checks: list[tuple[int, list[tuple[int, int]], set[int]]] = []
+        member_checks: list[tuple[list[tuple[int, int]], int]] = []
         if worker is not None:
             for g, c_args in enumerate(c_args_list):
                 child_ptrs = worker._child_ptrs_in_args(c_args)
                 if not child_ptrs:
                     continue
-                worker_pin = cpp_worker_ids[g] if g < len(cpp_worker_ids) else -1
-                eligible_g = worker_id_sets[g] if g < len(worker_id_sets) else []
-                member_checks.append((g, child_ptrs, self._child_dispatch_candidates(int(worker_pin), eligible_g)))
+                member_checks.append((child_ptrs, worker_ids[g]))
         prov_guard: Any = (
             worker._child_prov_lock if (worker is not None and member_checks) else contextlib.nullcontext()
         )
@@ -335,43 +306,11 @@ class Orchestrator:
                 captured_refs.extend(self._worker._capture_remote_sidecar_refs(sidecar))
         try:
             with prov_guard:
-                if member_checks:
-                    # Materialise a full per-member affinity so each child member's
-                    # resolved owner is the effective affinity C++ keys its child
-                    # TensorKey by (see the single-submit note); non-child members
-                    # keep their original affinity / -1. Only an empty/None
-                    # ``workers`` is padded — a non-empty list must already be one
-                    # per member (C++ enforces this), so padding a short one would
-                    # silently bypass that length check.
-                    if cpp_worker_ids:
-                        if len(cpp_worker_ids) != len(c_args_list):
-                            raise ValueError(
-                                f"submit_next_level_group: workers length {len(cpp_worker_ids)} "
-                                f"!= {len(c_args_list)} args"
-                            )
-                        cpp_worker_ids = list(cpp_worker_ids)
-                    else:
-                        cpp_worker_ids = [-1] * len(c_args_list)
-                for g, child_ptrs, candidates in member_checks:
+                for child_ptrs, target_worker_id in member_checks:
                     assert worker is not None  # member_checks is only populated when worker is present
-                    worker._child_prov_check_dispatch(child_ptrs, candidates, api="submit_next_level_group")
-                    cpp_worker_ids[g] = next(iter(candidates))
-                # A group dispatches its members in parallel to distinct workers.
-                # Two members pinned to the same owner (e.g. two child args on the
-                # same chip) would give the same affinity twice; the scheduler sees
-                # that WorkerThread idle for both and serializes them on one thread.
-                # This rejects that duplicate-pinned case only — full injective
-                # feasibility (e.g. a wildcard member left with no free worker once
-                # a child member is pinned) is the scheduler's pre-existing capacity
-                # concern, not narrowed here.
-                pinned = [wid for wid in cpp_worker_ids if wid >= 0]
-                if len(pinned) != len(set(pinned)):
-                    raise ValueError(
-                        f"submit_next_level_group: members resolve to duplicate target workers "
-                        f"{cpp_worker_ids} — a group must dispatch to distinct workers"
-                    )
+                    worker._child_prov_check_dispatch(child_ptrs, target_worker_id, api="submit_next_level_group")
                 self._o.submit_next_level_group(
-                    digest, kind, target_namespace, c_args_list, cfg, cpp_worker_ids, worker_id_sets, remote_sidecars
+                    digest, kind, target_namespace, c_args_list, cfg, worker_ids, worker_id_sets, remote_sidecars
                 )
         except BaseException:
             if self._worker is not None:

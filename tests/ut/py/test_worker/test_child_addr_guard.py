@@ -133,7 +133,7 @@ class TestProvenanceTable:
             with pytest.raises(ValueError, match="not a live malloc base"):
                 w._child_prov_require_malloc_base(0, 0x1000, api="free")
             with pytest.raises(ValueError, match="not a live allocation on target worker 0"):
-                w._child_prov_check_dispatch([(0x1000, 0)], {0}, api="submit_next_level")
+                w._child_prov_check_dispatch([(0x1000, 0)], 0, api="submit_next_level")
 
     def test_drop_last_role_deletes_entry_no_empty_state(self):
         # Dropping the last role deletes the key outright — it never leaves a
@@ -167,37 +167,17 @@ class TestProvenanceTable:
 
 
 class TestDispatchResolution:
-    def test_candidates_pinned_worker(self):
-        o = Orchestrator(MagicMock(), _l3())
-        assert o._child_dispatch_candidates(2, [0, 1, 2]) == {2}
-
-    def test_candidates_wildcard_uses_eligible_set(self):
-        o = Orchestrator(MagicMock(), _l3())
-        assert o._child_dispatch_candidates(-1, [0, 1]) == {0, 1}
-
-    def test_candidates_wildcard_unconstrained_uses_full_pool(self):
-        w = _l3()
-        w._chip_shms = [object(), object(), object()]  # 3 chips
-        o = Orchestrator(MagicMock(), w)
-        assert o._child_dispatch_candidates(-1, []) == {0, 1, 2}
-
     def test_unique_target_and_live_passes(self):
         w = _l3()
         _record_malloc(w, 0, 0x1000)
         with w._child_prov_lock:
-            w._child_prov_check_dispatch([(0x1000, 0)], {0}, api="submit_next_level")
-
-    def test_ambiguous_target_rejected(self):
-        w = _l3()
-        _record_malloc(w, 0, 0x1000)
-        with w._child_prov_lock, pytest.raises(ValueError, match="cannot resolve a unique"):
-            w._child_prov_check_dispatch([(0x1000, 0)], {0, 1}, api="submit_next_level")
+            w._child_prov_check_dispatch([(0x1000, 0)], 0, api="submit_next_level")
 
     def test_unique_target_but_wrong_worker_rejected(self):
         w = _l3()
         _record_malloc(w, 0, 0x1000)  # lives on worker 0
         with w._child_prov_lock, pytest.raises(ValueError, match="not a live allocation on target worker 1"):
-            w._child_prov_check_dispatch([(0x1000, 0)], {1}, api="submit_next_level")
+            w._child_prov_check_dispatch([(0x1000, 0)], 1, api="submit_next_level")
 
 
 # ----------------------------------------------------------------------------
@@ -555,7 +535,7 @@ class TestDomainReleaseOrdering:
         def _fake_dispatch(**kwargs):
             try:
                 with w._child_prov_lock:
-                    w._child_prov_check_dispatch([(0x5000, 0)], {0}, api="submit_next_level")
+                    w._child_prov_check_dispatch([(0x5000, 0)], 0, api="submit_next_level")
                 outcome["dispatch"] = "allowed"
             except ValueError:
                 outcome["dispatch"] = "rejected"

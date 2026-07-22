@@ -449,12 +449,6 @@ void WorkerManager::stop() {
     sub_threads_.clear();
 }
 
-WorkerThread *WorkerManager::get_worker_by_index(WorkerType type, int worker_index) const {
-    auto &threads = (type == WorkerType::NEXT_LEVEL) ? next_level_threads_ : sub_threads_;
-    if (worker_index < 0 || static_cast<size_t>(worker_index) >= threads.size()) return nullptr;
-    return threads[static_cast<size_t>(worker_index)].get();
-}
-
 WorkerThread *WorkerManager::get_worker_by_id(WorkerType type, int32_t worker_id) const {
     auto &threads = (type == WorkerType::NEXT_LEVEL) ? next_level_threads_ : sub_threads_;
     for (auto &wt : threads) {
@@ -472,23 +466,9 @@ std::vector<int32_t> WorkerManager::next_level_worker_ids() const {
     return worker_ids;
 }
 
-WorkerThread *WorkerManager::pick_idle(
-    WorkerType type, const std::vector<WorkerThread *> &exclude, const std::vector<int32_t> &eligible_worker_ids
-) const {
-    auto &threads = (type == WorkerType::NEXT_LEVEL) ? next_level_threads_ : sub_threads_;
-    for (auto &wt : threads) {
+WorkerThread *WorkerManager::pick_idle_sub_excluding(const std::vector<WorkerThread *> &exclude) const {
+    for (const auto &wt : sub_threads_) {
         if (!wt->idle()) continue;
-        if (!eligible_worker_ids.empty()) {
-            bool eligible = false;
-            int32_t worker_id = wt->worker_id();
-            for (int32_t id : eligible_worker_ids) {
-                if (id == worker_id) {
-                    eligible = true;
-                    break;
-                }
-            }
-            if (!eligible) continue;
-        }
         bool excluded = false;
         for (auto *ex : exclude) {
             if (ex == wt.get()) {

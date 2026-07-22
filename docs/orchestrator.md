@@ -79,7 +79,8 @@ Orchestrator validates exact placement, worker existence, local-vs-remote
 compatibility, remote handle access rights for the tensor tag, bare host
 pointers, and remote null OUTPUT tensors before committing the slot.
 For NEXT_LEVEL tasks, `worker`/`workers` are required stable worker ids rather
-than C++ worker-thread vector indices. SUB submit APIs remain unconstrained.
+than C++ worker-thread vector indices. SUB submit APIs expose no worker
+selection and use the shared SUB ready queue.
 
 ---
 
@@ -104,6 +105,7 @@ SubmitResult Orchestrator::submit_next_level(const CallableIdentity &callable,
     s.callable    = callable;
     s.task_args   = std::move(args);
     s.config      = config;
+    s.target_worker_ids = {worker};
 
     // 3. Walk task_args tags, derive dependencies
     //    (dedup producers: same producer may appear on multiple input tensors)
@@ -131,10 +133,16 @@ SubmitResult Orchestrator::submit_next_level(const CallableIdentity &callable,
     // 5. Register with scope (holds slot open until scope_end releases ref)
     scope_.register_task(sid);          // increments s.fanout_total by 1
 
-    // 6. Push fanout edges onto scheduler's wiring queue
-    //    (Scheduler wires producer→consumer asynchronously; avoids blocking
-    //    the Orch thread on fanout_mu)
-    scheduler_.enqueue_wiring(sid, std::move(producers));
+    // 6. Attach fanout edges under each producer's mutex. Producers already
+    //    completed do not count as live fanins; failed producers poison this
+    //    slot. Route an immediately READY slot through enqueue_ready().
+    attach_fanout_and_count_live_producers(sid, producers);
+    if (s.fanin_count == 0) {
+        s.state = TaskState::READY;
+        enqueue_ready(sid);
+    } else {
+        s.state = TaskState::PENDING;
+    }
 
     // 7. Return handle
     return {sid};
@@ -183,10 +191,11 @@ SUB tasks remain on their shared queue.
 fanout_total. Without this, a task with no downstream consumer would never be
 reclaimable. See [§6 Scope](#6-scope).
 
-**Step 6 — wiring queue**: Fanout edges (producer knows its consumers) are
-wired **asynchronously** by the Scheduler thread. This decouples submit from
-`fanout_mu` contention. See [scheduler.md](scheduler.md) §2 for the wiring
-phase.
+**Step 6 — fanout attachment and READY routing**: Submission synchronously
+locks each producer's `fanout_mu`, attaches the consumer, and counts only live
+producers. An immediately READY task is routed to its exact NEXT_LEVEL worker
+FIFO, the NEXT_LEVEL group FIFO, or the shared SUB FIFO. See
+[scheduler.md](scheduler.md) §1.
 
 ---
 
@@ -730,8 +739,8 @@ instead of stalling forever. Default timeout: 10 s.
 
 - [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — how
   Orchestrator fits alongside Scheduler and Worker
-- [scheduler.md](scheduler.md) — what happens to slots after they're pushed
-  onto the wiring queue
+- [scheduler.md](scheduler.md) — READY dispatch and completion-time dependency
+  release
 - [task-flow.md](task-flow.md) — the data (Callable / TaskArgs / CallConfig)
   being moved by `submit_*`
 - [comm-domain.md](comm-domain.md) — `orch.allocate_domain` dynamic

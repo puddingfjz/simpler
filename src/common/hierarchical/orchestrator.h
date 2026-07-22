@@ -185,7 +185,7 @@ private:
     // can patch `tensor.data` on OUTPUT tensors flagged for auto-allocation.
     SubmitResult submit_impl(
         WorkerType worker_type, const CallableIdentity &callable, const CallConfig &config,
-        std::vector<TaskArgs> args_list, std::vector<int32_t> affinities = {},
+        std::vector<TaskArgs> args_list, std::vector<int32_t> target_worker_ids = {},
         std::vector<std::vector<int32_t>> eligible_worker_ids = {},
         std::vector<RemoteTaskArgsSidecar> remote_sidecars = {}
     );
@@ -205,14 +205,15 @@ private:
     // Walk the tags of each TaskArgs in `args_list`, accumulating producer
     // slots (for INPUT/INOUT tags) and registering outputs in the tensormap
     // (for OUTPUT/INOUT/OUTPUT_EXISTING tags). NO_DEP tags are skipped.
-    // `affinities` maps args_list[i] to worker id for TensorKey construction.
+    // `target_worker_ids` maps NEXT_LEVEL args_list[i] to its exact worker for
+    // TensorKey construction. It is empty for SUB tasks.
     void infer_deps(
-        TaskSlot slot, const std::vector<TaskArgs> &args_list, const std::vector<int32_t> &affinities,
+        TaskSlot slot, const std::vector<TaskArgs> &args_list, const std::vector<int32_t> &target_worker_ids,
         const std::vector<RemoteTaskArgsSidecar> &remote_sidecars, std::vector<TaskSlot> &producers,
         std::vector<TensorKey> &output_keys
     );
     void validate_worker_eligibility(
-        WorkerType worker_type, size_t args_count, const std::vector<int32_t> &affinities,
+        WorkerType worker_type, size_t args_count, const std::vector<int32_t> &target_worker_ids,
         const std::vector<std::vector<int32_t>> &eligible_worker_ids
     ) const;
     void validate_remote_sidecars(

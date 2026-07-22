@@ -488,11 +488,10 @@ Worker teardown is deferred to a later design.
 
 ### Dispatch Contract
 
-Parent-side scheduling assumes the handle's `hashid` is installed on every
-active target in its registration scope. Dispatch choices are constrained by
-the handle namespace, submit-time affinity, and tensor/buffer accessibility.
-Submit-time live validation is a preflight check only. It does not pin the
-target identity through later drain or child dispatch. Callers must not
+Parent-side scheduling requires the handle's `hashid` on the submitted exact
+target. The Orchestrator validates the handle namespace and tensor/buffer
+accessibility for that target before committing the slot. The target identity
+is then fixed in `TaskSlotState` through dispatch. Callers must not
 concurrently unregister a handle while `Worker.run()` or any in-flight task may
 submit or use that handle; wait for the relevant run/drain to return before
 unregistering it.

@@ -15,16 +15,16 @@
  * The Scheduler thread routes tasks through the DAG lifecycle:
  *   ready_queue → dispatch (via WorkerManager) → completion → fanout release → new ready
  *
- * Worker pool management (WorkerThread creation, idle selection, dispatch) is
- * delegated to WorkerManager. The Scheduler only drives the DAG state machine.
+ * Worker pool management (WorkerThread creation and dispatch) is delegated to
+ * WorkerManager. NEXT_LEVEL placement is fixed at submit; SUB remains free.
  *
  * Flow:
- *   Orch: submit() → ready_queue.push(slot) + Scheduler::notify_ready()
+ *   Orch: submit() → directed NEXT_LEVEL queue or shared SUB queue + notify
  *
  *   Scheduler thread:
- *     wait on cv (ready_queue OR completion_queue non-empty)
+ *     wait on cv (ready queue OR completion queue OR stop requested)
  *     drain completion_queue → on_task_complete → fanout release → ready_queue
- *     drain ready_queue → manager.pick_idle → dispatch
+ *     launch directed NEXT_LEVEL tasks, then freely scheduled SUB tasks
  *
  *   WorkerThread (managed by WorkerManager):
  *     loop: task_queue.pop() → endpoint.run(dispatch) →
@@ -102,4 +102,5 @@ private:
     void dispatch_ready();
     void dispatch_next_level_group();
     void dispatch_next_level_singles();
+    void dispatch_sub_ready();
 };

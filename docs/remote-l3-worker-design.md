@@ -43,10 +43,9 @@ Implemented:
 - Explicit endpoint outcomes: success, task failure, endpoint failure, and
   skipped group members. Failed producers poison downstream consumers instead
   of completing successfully.
-- Stable NEXT_LEVEL `worker_id` metadata shared by local and remote
-  children, submit-time worker eligibility, worker affinity validation
-  against eligibility, and Scheduler selection from only eligible idle
-  workers.
+- Stable NEXT_LEVEL `worker_id` metadata shared by local and remote children,
+  submit-time validation of the exact target against worker eligibility, and
+  directed Scheduler dispatch to that target only.
 - C++ remote tensor sidecars, remote-aware `TensorKey` values, and submit-time
   rejection of remote sidecars against local endpoints, bare host pointers, and
   remote null OUTPUT tensors without a sidecar.
@@ -178,8 +177,8 @@ On dispatch, `WorkerThread` builds a task packet from `TaskSlotState`, calls
 the endpoint, reports endpoint errors, and notifies the Scheduler with an
 explicit success/failure outcome.
 
-Ready queues, group dispatch, affinities, fanin/fanout, and ring release remain
-in the existing runtime. The first-error-wins policy remains only as the error
+Directed ready queues, exact group dispatch, fanin/fanout, and ring release
+remain in the common runtime. The first-error-wins policy remains only as the error
 reporting policy for choosing which root error `drain()` raises. The important
 change is that completion is no longer implicitly success; every endpoint,
 including `LocalMailboxEndpoint`, must report an explicit success/failure

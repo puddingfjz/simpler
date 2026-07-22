@@ -93,16 +93,17 @@ One `submit_next_level(callable, task_args, config, worker=worker_id)` call:
 3. walks `TaskArgs` tags (INPUT/OUTPUT/INOUT/OUTPUT_EXISTING/NO_DEP) to
    lookup/insert TensorMap entries
 4. records fanin metadata on producer slots
-5. pushes the new slot onto the scheduler's wiring queue
+5. attaches fanout edges and routes READY work to its target queue
 
 See [orchestrator.md](orchestrator.md) for the 7-step submit flow and state machine.
 
 ### Scheduler (Scheduler thread)
 
-The **DAG executor**. A dedicated C++ thread that drains three queues:
+The **DAG executor**. A dedicated C++ thread that handles:
 
-- **wiring queue** — slots just submitted; wire fanout edges, compute readiness
-- **ready queue** — slots with all fanin satisfied; pick an idle WorkerThread and dispatch
+- **directed NEXT_LEVEL queues** — one single-task FIFO per stable worker ID
+  plus one all-targets-ready group FIFO
+- **shared SUB queue** — freely select idle SUB WorkerThreads
 - **completion queue** — slots whose worker finished; release fanout, wake downstream consumers, retire slot
 
 The Scheduler never inspects task data — it just moves slot ids between queues
@@ -141,13 +142,12 @@ what flows through `ChipWorker::run`.
                  │ submit(callable, args, config)  │
                  │   1. ring.alloc()               │
                  │   2. TensorMap lookup/insert    │
-                 │   3. record fanin              │
-                 │   4. push wiring_queue ───────►│
-                 │                                 │ Phase 0: drain wiring_queue
-                 │                                 │   wire fanout edges
-                 │                                 │   if ready → ready_queue
-                 │                                 │ pop ready_queue
-                 │                                 │ pick idle WorkerThread
+                 │   3. attach fanout + fanin      │
+                 │   4. if READY, route queue ────►│
+                 │                                 │ drain completion_queue
+                 │                                 │   release/poison fanout
+                 │                                 │ pop directed/shared queue
+                 │                                 │ resolve target (NL) or idle SUB
                  │                                 │ wt.dispatch(slot_id) ──────► WorkerThread
                  │                                 │                              encode mailbox → spin-poll TASK_DONE
                  │                                 │                              (blocking; child runs the kernel)
